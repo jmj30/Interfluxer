@@ -311,6 +311,7 @@ class HTTPClient(
             Either a dictionary or multipart data form
 
         """
+        # with the help of an ai to debug and help we have fixed sending files
         if isinstance(payload, FormData):
             return payload
         if payload is None:
@@ -339,31 +340,53 @@ class HTTPClient(
             files = (files,)
 
         attachments = []
-
-        form_data = FormData(quote_fields=False)
-
+        file_parts = []
+     
         for index, file in enumerate(files):
-            file_data = models.open_file(file).read()
+            fh = models.open_file(file)
+            try:
+                fh.seek(0)
+            except Exception:
+                pass
+            file_data = fh.read()
 
             if isinstance(file, models.File):
-                form_data.add_field(
+                file_parts.append((
                     f"files[{index}]",
                     file_data,
-                    filename=file.file_name,
-                    content_type=file.content_type or get_file_mimetype(file_data),
-                )
-                attachments.append({"id": index, "description": file.description, "filename": file.file_name})
+                    file.file_name,
+                    file.content_type or "application/octet-stream",
+                ))
+                attachments.append({"id": index, "filename": file.file_name})
             else:
-                form_data.add_field(
+                file_parts.append((
                     f"files[{index}]",
                     file_data,
-                    filename=file.split(os.sep)[-1],
-                    content_type=get_file_mimetype(file_data),
-                )
-        if attachments:
-            payload["attachments"] = attachments
+                    file.split(os.sep)[-1],
+                    "application/octet-stream",
+                ))
 
-        form_data.add_field("payload_json", FastJson.dumps(payload))
+             # same fields as raw_webhook_send: no tts / enforce_nonce
+            payload.pop("tts", None)
+            payload.pop("enforce_nonce", None)
+            if not payload.get("content"):
+                payload["content"] = "\u200b"
+
+            form_data = FormData()   # default quoting, not quote_fields=False
+
+            # 1) payload without attachment metadata, before the files
+            form_data.add_field("payload_json", FastJson.dumps(payload), content_type="application/json")
+
+            for name, data, filename, ctype in file_parts:
+                form_data.add_field(name, data, filename=filename, content_type=ctype)
+
+            # 2) payload with attachment metadata, after the files
+            if attachments:
+                form_data.add_field(
+                    "payload_json",
+                    FastJson.dumps({**payload, "attachments": attachments}),
+                    content_type="application/json",
+                )
         return form_data
 
     async def request(  # noqa: C901
